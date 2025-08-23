@@ -1,0 +1,246 @@
+<html>
+  <head>
+    <link rel="icon" href="data:;base64,iVBORw0KGgo=" />
+    <style>
+        .warning {
+            color: orangered;
+        }
+        #imageContainer {
+          position: relative;
+          width: min-content;
+          display: grid;
+          border: 1px;
+
+        }
+        #imageContainer > * {
+          grid-column: 1;
+          grid-row: 1;
+        }
+
+        #imageContainer > .progress-bar {
+            background-color: rgba(0,0,0, 0.7);
+            justify-self: end;
+            height: 100%;
+        }
+
+    </style>
+  </head>
+  <body>
+    <ol>
+        <li>
+          <p id="imageStatus">Wpierw obrazek</p>
+          <input type="file" id="imageUploader">
+        </li>
+        <li>
+          <p id="audioStatus">Nastepnie audio. Przypominajka: tutaj (YouTube) MP3, FLAC tylko na Spotify</p>
+          <input type="file" id="audioUploader">
+        </li>
+        <li>
+          <button id="buttonEncode" disabled>Wprowadz pliki</button>
+        </li>
+    </ol>
+    <div><span id="message"></span><a style="display: none;" href="#" id="downloadHref">Pobierz</a></div>
+    <script type="module">
+      console.assert(window.crossOriginIsolated, 'no window.crossOriginIsolated');
+      const imageVideoLengthSeconds = 5;
+      let audioCodec = 'copy';
+      let processing = undefined;//pre or full
+      let audioOk = false, imageOk = false;
+
+
+      import { FFmpeg } from "./js/node_modules/@ffmpeg/ffmpeg/dist/esm/index.js";
+      import { fetchFile  } from "./js/node_modules/@ffmpeg/util/dist/esm/index.js";
+      const message = document.getElementById('message');
+      const imageUi = document.getElementById('imageStatus');
+      const ffmpegLog = document.getElementById('ffmpegLog');
+      const img = document.getElementById('imagePlaceholder');
+      const downloadHref = document.getElementById('downloadHref');
+      const ffmpeg = new FFmpeg();
+      ffmpeg.on("log", ({ message }) => {
+        ffmpegLog.innerText = message;
+        console.log(message);
+      })
+      ffmpeg.on("progress", ({ progress, time }) => {
+        if(processing === 'pre') {
+          imageUi.innerHTML = `Obrazek ${(time / 10000 / imageVideoLengthSeconds).toFixed(2)} %`;
+        } else {
+          const percent = progress * 100;
+          progressBar.style.width = `${(100 - percent)}%`;
+          message.innerHTML = `${percent.toFixed(2)} %, time: ${(time / 1000000).toFixed(1)} s`;
+        }
+      });
+
+      const video = document.getElementById('output-video');
+      const imageContainer = document.getElementById('imageContainer');
+      const progressBar = document.querySelector('#imageContainer > .progress-bar');
+      video.addEventListener('loadeddata', () => {
+        downloadHref.href = video.src;
+        downloadHref.style.display = '';
+      });
+
+
+      function showImage() {
+        console.log('SHOW IMAGE')
+        imageContainer.style.display = "";
+        progressBar.style.width = '100%';
+        downloadHref.style.display = 'none';
+        message.innerText='';
+        video.style.display = "none";
+      }
+      function showVideo() {
+        console.log('SHOW VIDEO')
+        video.style.display = "";
+        progressBar.style.display = '';
+        imageContainer.style.display = "none";
+      }
+
+      const transcode = async () => {
+        message.innerHTML = 'Start transcoding';
+        processing = true;
+        console.time('exec');
+        await ffmpeg.exec([
+          '-stream_loop', "-1",
+          '-i', "out5s.mp4",
+          '-i', "rozmowa",
+          '-tune', "stillimage",
+          '-c:v', "copy",
+          '-c:a', audioCodec,
+          '-shortest', "out.mp4"
+        ]);
+        ffmpegLog.innerText='';
+        console.timeEnd('exec');
+        processing = undefined;
+        message.innerHTML = 'Gotowe:)';
+        const data = await ffmpeg.readFile('out.mp4');
+        const blob = new Blob([data.buffer], { type: 'video/mp4' });
+
+        URL.revokeObjectURL(video.src);
+        const blobUrl = URL.createObjectURL(blob);
+        video.src = blobUrl;
+        showVideo();
+      }
+      const btnEncode = document.getElementById('buttonEncode');
+      btnEncode.setAttribute('disabled','disabled');
+      btnEncode.addEventListener('click', () => {
+        showImage();
+        transcode();
+      });
+
+      function changeExtension(name, ext) {
+          const pos = name.indexOf('.');
+          if(pos < 0) return name;
+          return name.substring(0,pos) + '.' + ext;
+      }
+
+      function isCodecNeeded(audioMimeType) {
+        switch(audioMimeType) {
+          case 'audio/aac':
+          case 'audio/mpeg':
+          case 'audio/ogg':
+          case 'audio/webm':
+          case '':
+            return false;
+        }
+        return true;
+      }
+
+      document.getElementById('audioUploader').addEventListener('change', async ({ target: { files } }) => {
+        audioOk = false;
+        const file = files[0];
+        const ui = document.getElementById('audioStatus');
+        if(!file.type.startsWith('audio/')) {
+          ui.innerHTML = 'Nie wyglada to na audio: typ ' + file.type;
+          return;
+        }
+        const encodingNeeded = isCodecNeeded(file.type);
+        audioCodec = encodingNeeded ? 'aac' : 'copy';
+
+        ui.innerHTML = 'Pobieram audio';
+        const audioFile = document.getElementById('audioUploader').files[0];
+        const audioData = await fetchFile(audioFile);
+
+        downloadHref.download = changeExtension(audioFile.name, 'mp4');
+
+        ui.innerHTML = 'Wgrywam audio';
+        await ffmpeg.writeFile("rozmowa", audioData);
+        ui.innerHTML = 'Audio gotowe ' + audioFile.type + (encodingNeeded ? ' <span class="warning">uwaga: bedzie wolno, bo potrzebna konwersja; zalecany format MP3 aby bylo szybko</span>' : '');
+        audioOk = true;
+        checkOk();
+      });
+
+      document.getElementById('imageUploader').addEventListener('change', async ({ target: { files } }) => {
+        imageOk = false;
+        const file = files[0];
+        if(processing) {
+          ui.innerHTML = 'Poczekaj na koniec przetwazania';
+          return;
+        }
+        if(!file.type.startsWith('image/')) {
+          imageUi.innerHTML = 'Nie wyglada to na obrazek: typ ' + file.type;
+          return;
+        }
+        URL.revokeObjectURL(img.src);
+        img.src = URL.createObjectURL(file);
+      });
+      img.addEventListener('load', async () => {
+        if(img.width % 2 || img.height % 2) {
+          imageUi.innerHTML = 'Obrazek musi miec podzielna przez dwa wysykosc i szerokosc.';
+          return;
+        }
+        video.poster = img.src;
+        showImage();
+        imageUi.innerHTML = 'Pobieram obrazek';
+        const imageFile = await fetchFile(img.src);
+        imageUi.innerHTML = 'Wgrywam obrazek';
+        await ffmpeg.writeFile("cover", imageFile);
+        imageUi.innerHTML = 'Generuje video z obrazka';
+        transcodeImage();
+      });
+      const transcodeImage = async () => {
+        processing = 'pre';
+        console.time('exec');
+        await ffmpeg.exec([
+          '-loop', "1", '-i', "cover",
+          '-c:v', "libx264",
+          '-tune', "stillimage",
+          '-pix_fmt', "yuv420p",
+          '-preset', "veryfast",
+          '-t', imageVideoLengthSeconds.toString(),
+          "out5s.mp4"
+        ]);
+        ffmpegLog.innerText='';
+        console.timeEnd('exec');
+        processing = undefined;
+        imageOk = true;
+        imageUi.innerHTML = 'Obrazek przetransformowany';
+        checkOk();
+      }
+
+      const checkOk = function() {
+          if(audioOk && imageOk) {
+            const btn = document.getElementById('buttonEncode');
+            btn.innerHTML = 'START';
+            btn.removeAttribute('disabled');
+          }
+      }
+      ffmpeg.load({
+        coreURL: "./../../../core/dist/esm/ffmpeg-core.js"
+      }).then(() => {
+        ffmpegLog.innerText = 'FFMpeg initialized';
+      });
+
+      </script>
+
+      <div>
+        <output id="ffmpegLog">Not initialized</output>
+      </div>
+
+      <div>
+        <div id="imageContainer" style="display: none;">
+          <img id="imagePlaceholder" alt="Podglad obrazka" />
+          <div class="progress-bar"></div>
+        </div>
+        <video style="display: block;" id="output-video" controls></video>
+      </div>
+  </body>
+</html>
